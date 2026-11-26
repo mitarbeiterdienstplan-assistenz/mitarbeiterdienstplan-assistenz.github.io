@@ -35,7 +35,8 @@ function kw(s){const d=new Date(dayNum(s)*864e5);d.setUTCDate(d.getUTCDate()-mod
 function toMin(t){const [h,m]=t.split(":").map(Number);return h*60+m}
 function dur(s){const a=toMin(s.from),b=toMin(s.to);return b>a?b-a:b+1440-a}
 function hours(min){return (min/60).toFixed(2).replace(".",",")}
-function initials(n){return String(n).trim().split(/\s+/).map(w=>w[0]||"").join("").slice(0,2).toUpperCase()}
+// Anfangsbuchstaben nur aus echten Wörtern (Klammern wie "(Test)" zählen nicht mit)
+function initials(n){return String(n).split(/\s+/).map(w=>w.replace(/[^\p{L}]/gu,"")).filter(Boolean).filter(w=>w!=="Test").map(w=>w[0]).join("").slice(0,2).toUpperCase()||"?"}
 const overnight = s => toMin(s.to) <= toMin(s.from);
 
 function toast(title,msg,bad){
@@ -178,7 +179,7 @@ function render(){
   if($("screen-app").hidden)return;
   const n0=mondayNum(weekOffset), days=[...Array(7)].map((_,i)=>fromNum(n0+i)), today=iso(new Date());
   $("kwlabel").textContent="KW "+kw(days[0]);
-  $("who-label").textContent="Angemeldet: "+nameOf(me)+(isChef?" (Chef)":"");
+  $("who-label").textContent=isChef&&!team.has(me)?"Angemeldet als Chef":"Angemeldet: "+nameOf(me)+(isChef?" (Chef)":"");
 
   // Mitarbeiter mit Stunden
   const members=[...team.entries()].map(([mail,t])=>({mail,...t})).sort((a,b)=>a.name.localeCompare(b.name,"de"));
