@@ -44,7 +44,7 @@ function toast(title,msg,bad){
   el.innerHTML="<b>"+esc(title)+"</b><span>"+esc(msg)+"</span>"; el.hidden=false;
   clearTimeout(toast.h); toast.h=setTimeout(()=>el.hidden=true,3200);
 }
-function fail(e){console.error(e);toast("Das hat nicht geklappt", e?.code==="permission-denied"?"Dafür fehlt die Berechtigung.":"Bitte nochmal versuchen. ("+(e?.code||e?.message||"Fehler")+")",true)}
+function fail(e){console.error(e);toast("Das hat nicht geklappt", e?.code==="permission-denied"?"Der Dienst wurde inzwischen geändert (z. B. hat jemand anderes schon übernommen). Bitte nochmal nachsehen.":"Bitte nochmal versuchen. ("+(e?.code||e?.message||"Fehler")+")",true)}
 
 function authMessage(code){
   return ({
@@ -129,17 +129,26 @@ $("denied-check").onclick=()=>route(auth.currentUser);
 
 onAuthStateChanged(auth,user=>route(user));
 
+// routeRun verhindert, dass zwei gleichzeitige Prüfungen die Daten doppelt laden
+let routeRun=0;
 async function route(user){
+  const run=++routeRun;
   stopListeners(); closeModal();
   if(!user){setMode("login");show("screen-login");return}
   if(!user.emailVerified){$("verify-mail").textContent=user.email;$("verify-err").hidden=true;show("screen-verify");return}
   me=user.email.toLowerCase(); isChef=false;
-  try{await getDoc(doc(db,"admins",me));isChef=true}catch(e){/* kein Chef */}
-  if(!isChef){
+  let netErr=false;
+  try{await getDoc(doc(db,"admins",me));isChef=true}
+  catch(e){if(e.code!=="permission-denied"){netErr=true;console.error(e)}}
+  if(run!==routeRun)return;
+  if(!isChef&&!netErr){
     let ok=false;
-    try{ok=(await getDoc(doc(db,"team",me))).exists()}catch(e){console.error(e)}
-    if(!ok){$("denied-mail").textContent=me;show("screen-denied");return}
+    try{ok=(await getDoc(doc(db,"team",me))).exists()}
+    catch(e){if(e.code!=="permission-denied")netErr=true;console.error(e)}
+    if(run!==routeRun)return;
+    if(!ok&&!netErr){$("denied-mail").textContent=me;$("denied-text").hidden=false;$("denied-net").hidden=true;show("screen-denied");return}
   }
+  if(netErr){$("denied-text").hidden=true;$("denied-net").hidden=false;show("screen-denied");return}
   startApp();
 }
 
@@ -185,7 +194,8 @@ function render(){
   const members=[...team.entries()].map(([mail,t])=>({mail,...t})).sort((a,b)=>a.name.localeCompare(b.name,"de"));
   const shown=members.filter(t=>t.name.toLowerCase().includes(search)||t.mail.includes(search));
   $("people").innerHTML=shown.length?shown.map(t=>{
-    const min=weekShifts.filter(s=>s.who===t.mail&&s.status!=="open").reduce((a,s)=>a+dur(s),0);
+    // nur fest eingeteilte Dienste zählen (abgegebene oder noch nicht bestätigte nicht)
+    const min=weekShifts.filter(s=>s.who===t.mail&&s.status==="ok").reduce((a,s)=>a+dur(s),0);
     const soll=Number(t.soll)||0;
     return '<button class="person'+(focus===t.mail?" on":"")+'" data-a="focus" data-n="'+esc(t.mail)+'"><span class="av" style="background:var(--p'+colorOf(t.mail)+')">'+esc(initials(t.name))+'</span><span><b>'+esc(t.name)+'</b><span class="hrs'+(soll&&min/60>soll?" over":"")+'">'+hours(min)+' / '+hours(soll*60)+'</span></span></button>';
   }).join(""):'<p class="note">'+(members.length?"Niemand gefunden.":(isChef?"Noch keine Mitarbeiter. Oben auf „Mitarbeiter“ tippen und E-Mails eintragen.":"Noch keine Mitarbeiter eingetragen."))+'</p>';
@@ -287,7 +297,7 @@ async function act(a,el){
     if(a==="no"){await updateDoc(ref,{status:"open",taker:null});closeModal();toast("Abgelehnt","Der Dienst ist wieder offen.")}
     if(a==="askdel"){el.textContent="Wirklich löschen?";el.dataset.a="del"}
     else if(a==="del"){await deleteDoc(ref);closeModal();toast("Erfolgreich","Dienst wurde gelöscht.")}
-    if(a==="askrm"){el.textContent="Wirklich entfernen?";el.dataset.a="rm"}
+    if(a==="askrm"){el.textContent="Wirklich entfernen? (Dienste bleiben im Plan)";el.dataset.a="rm"}
     else if(a==="rm"){await deleteDoc(doc(db,"team",el.dataset.n));toast("Entfernt","Diese E-Mail hat keinen Zugriff mehr.");setTimeout(openTeam,50)}
     if(a==="copy"){
       const t=$("share-link").textContent;
@@ -311,10 +321,22 @@ document.body.addEventListener("click",e=>{
   if(a==="new")return openShift(null,b.dataset.date);
   if(a==="close")return closeModal();
   if(a==="focus"){focus=focus===b.dataset.n?null:b.dataset.n;return render()}
-  act(a,b);
+  // Doppeltippen verhindern: Knopf ist gesperrt, bis die Aktion fertig ist
+  if(b.disabled)return;
+  b.disabled=true;
+  act(a,b).finally(()=>{b.disabled=false});
 });
 
+// Doppeltes Speichern verhindern (z. B. zweimal schnell auf „Speichern“ getippt)
+let saving=false;
 document.body.addEventListener("submit",async e=>{
+  if(e.target.id!=="shift-form"&&e.target.id!=="team-form")return;
+  e.preventDefault();
+  if(saving)return;
+  saving=true;
+  try{await submitForm(e)}finally{saving=false}
+});
+async function submitForm(e){
   if(e.target.id==="shift-form"){
     e.preventDefault();
     const f=e.target, from=$("f-from").value, to=$("f-to").value, who=$("f-who").value, err=$("f-err");
@@ -339,4 +361,4 @@ document.body.addEventListener("submit",async e=>{
     try{await setDoc(doc(db,"team",mail),{name,soll,color});toast("Hinzugefügt",name+" kann sich jetzt registrieren.");setTimeout(openTeam,50)}
     catch(x){fail(x)}
   }
-});
+}

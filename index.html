@@ -172,8 +172,14 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 <!-- Nicht freigeschaltet -->
 <section class="screen center" id="screen-denied" hidden>
   <div class="auth">
-    <h2>Noch nicht freigeschaltet</h2>
-    <p class="note">Die E-Mail <b id="denied-mail"></b> ist nicht im Dienstplan eingetragen. Bitte frag deinen Chef, ob er sie unter „Mitarbeiter“ einträgt.</p>
+    <div id="denied-text">
+      <h2>Noch nicht freigeschaltet</h2>
+      <p class="note">Die E-Mail <b id="denied-mail"></b> ist nicht im Dienstplan eingetragen. Bitte frag deinen Chef, ob er sie unter „Mitarbeiter“ einträgt.</p>
+    </div>
+    <div id="denied-net" hidden>
+      <h2>Keine Verbindung</h2>
+      <p class="note">Der Dienstplan konnte nicht geladen werden. Bitte prüfe das Internet und tippe dann auf „Nochmal prüfen“.</p>
+    </div>
     <div class="row">
       <button class="btn" id="denied-check">Nochmal prüfen</button>
       <button class="btn ghost" data-logout>Abmelden</button>
@@ -212,6 +218,6 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid 
 <div class="modal" id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" id="dialog"></div></div>
 <div class="toast" id="toast" hidden></div>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=3"></script>
 </body>
 </html>
