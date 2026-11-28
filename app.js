@@ -615,7 +615,7 @@ function mailProblem(mail){
 function openWho(mail){
   const r=requests.find(x=>x.id===mail); if(!r)return;
   const rn=(r.name||"").toLowerCase();
-  // Personen ohne E-Mail; passende Namen (z. B. „Luke“ ↔ „Luk“) stehen oben
+  // Personen ohne E-Mail; passende Namen (z. B. „Alexander“ ↔ „Alex“) stehen oben
   const score=n=>{n=n.toLowerCase();return rn&&(rn.includes(n)||n.includes(rn.split(" ")[0]))?0:1};
   const cand=[...team.entries()].filter(([id])=>noMail(id)).sort((a,b)=>score(a[1].name)-score(b[1].name)||a[1].name.localeCompare(b[1].name,"de"));
   openModal('<h3>Wer ist das?</h3><p><b>'+esc(r.name||"Ohne Namen")+'</b> hat sich angemeldet mit <b>'+esc(mail)+'</b>.</p>'+
@@ -671,7 +671,7 @@ const demo = {
     me=isChef?"chef@beispiel.de":pick?pick[0]:[...team.keys()][0]||"";
     isOwner=isChef;
     // ?demo=gast: hat sich registriert, ist aber noch nicht bestätigt
-    isGuest=DEMO==="gast"; if(isGuest){me="luke.m@beispiel.de";myName="Luke"}
+    isGuest=DEMO==="gast"; if(isGuest){me="neu@beispiel.de";myName="Alex"}
     // Diese Woche noch leer? Dann gleich die erste Woche mit Diensten zeigen
     const first=this.shifts.map(s=>s.date).sort()[0];
     if(first&&dayNum(first)>mondayNum(0)+6)weekOffset=Math.floor((dayNum(first)-mondayNum(0))/7);
