@@ -104,6 +104,13 @@ h2,h3{margin:0;text-wrap:balance}
 .need .tm{font-weight:800;font-size:1.2rem;font-variant-numeric:tabular-nums}
 .need .why{color:var(--muted);font-size:.92rem}
 .chefopen{background:var(--open-bg);border:1.5px solid var(--open);border-radius:14px;padding:.8rem 1rem;display:flex;flex-direction:column;gap:.6rem}
+.chefreq{background:var(--accent-bg);border:1.5px solid var(--accent);border-radius:14px;padding:.8rem 1rem;display:flex;flex-direction:column;gap:.6rem;margin-bottom:.8rem}
+.chefreq h2{font-size:1.05rem;color:var(--accent)}
+.guest{background:var(--accent-bg);border:1.5px solid var(--accent);border-radius:14px;padding:.8rem 1rem;margin-bottom:.8rem}
+.guest h2{font-size:1.05rem;color:var(--accent);margin-bottom:.3rem}
+.guest p{margin:0}
+.chefbadge{font-style:normal;font-size:.72rem;font-weight:800;background:var(--accent);color:var(--accent-fg);border-radius:999px;padding:.05rem .5rem;margin-left:.4rem;vertical-align:middle}
+.chefreq .arow{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;justify-content:space-between;font-size:.95rem;border-top:1px solid rgb(0 0 0 / .08);padding-top:.5rem;overflow-wrap:anywhere}
 .chefopen h2{font-size:1.05rem;color:var(--open)}
 .chefopen .arow{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;justify-content:space-between;font-size:.95rem;border-top:1px solid rgb(0 0 0 / .08);padding-top:.5rem}
 
@@ -192,7 +199,11 @@ h2,h3{margin:0;text-wrap:balance}
 .trow{display:flex;gap:10px;align-items:center;border:1px solid var(--line);border-radius:12px;padding:8px;flex-wrap:wrap}
 .trow .tx{flex:1;min-width:10rem}
 .trow .tx b{display:block}
-.trow .tx span{font-size:.85rem;color:var(--muted);overflow-wrap:anywhere}
+.trow .tx span{display:block;font-size:.85rem;color:var(--muted);overflow-wrap:anywhere}
+.trow .tx span.nomail{color:var(--open);font-weight:700}
+.pick{display:flex;flex-wrap:wrap;gap:.5rem}
+.pick .btn{justify-content:flex-start;gap:.5rem;padding-left:.5rem}
+.pick .av{width:1.8rem;height:1.8rem;font-size:.75rem}
 .share{display:flex;gap:8px;align-items:center;background:var(--bg);border-radius:12px;padding:8px 10px;font-size:.9rem;overflow-wrap:anywhere;flex-wrap:wrap}
 .share code{flex:1;min-width:0}
 .demo-badge{background:var(--p4);color:#fff;font-weight:800;font-size:.8rem;text-align:center;padding:.25rem}
@@ -214,7 +225,10 @@ h2,h3{margin:0;text-wrap:balance}
       <button type="button" class="on" id="tab-login" role="tab" aria-selected="true">Anmelden</button>
       <button type="button" id="tab-register" role="tab" aria-selected="false">Registrieren</button>
     </div>
-    <p class="note" id="register-hint" hidden>Registrieren geht nur mit der E-Mail, die dein Chef eingetragen hat. Das Passwort legst du selbst fest.</p>
+    <p class="note" id="register-hint" hidden>Gib deinen Namen, deine E-Mail und ein eigenes Passwort ein. Danach siehst du den Plan. Sobald dein Chef bestätigt hat, wer du bist, kannst du auch absagen und übernehmen.</p>
+    <label class="field" id="name-wrap" hidden>Dein Name
+      <input type="text" id="login-name" autocomplete="name" maxlength="60">
+    </label>
     <label class="field">E-Mail
       <input type="email" id="login-email" autocomplete="email" inputmode="email" required>
     </label>
@@ -246,8 +260,8 @@ h2,h3{margin:0;text-wrap:balance}
 <section class="screen center" id="screen-denied" hidden>
   <div class="auth">
     <div id="denied-text">
-      <h2>Noch nicht freigeschaltet</h2>
-      <p class="note">Die E-Mail <b id="denied-mail"></b> ist nicht im Dienstplan eingetragen. Bitte frag deinen Chef, ob er sie unter „Mitarbeiter“ einträgt.</p>
+      <h2>Kein Zugriff</h2>
+      <p class="note">Für <b id="denied-mail"></b> ist der Dienstplan gesperrt. Wenn das ein Irrtum ist, sprich bitte deinen Chef an.</p>
     </div>
     <div id="denied-net" hidden>
       <h2>Keine Verbindung</h2>
@@ -298,6 +312,6 @@ h2,h3{margin:0;text-wrap:balance}
 <div class="modal" id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" id="dialog"></div></div>
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script type="module" src="app.js?v=6"></script>
+<script type="module" src="app.js?v=7"></script>
 </body>
 </html>

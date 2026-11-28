@@ -1,11 +1,11 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  sendEmailVerification, sendPasswordResetEmail, signOut
+  sendEmailVerification, sendPasswordResetEmail, signOut, updateProfile
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, collection, doc, getDoc, onSnapshot, query, where,
-  setDoc, addDoc, updateDoc, deleteDoc
+  setDoc, addDoc, updateDoc, deleteDoc, getDocs, writeBatch, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -43,8 +43,10 @@ function kw(s){const d=new Date(dayNum(s)*864e5);d.setUTCDate(d.getUTCDate()-mod
   const f=new Date(Date.UTC(d.getUTCFullYear(),0,4));return 1+Math.round(((d-f)/864e5-3+mod(f.getUTCDay()+6,7))/7)}
 function toMin(t){const [h,m]=t.split(":").map(Number);return h*60+m}
 function dur(s){const a=toMin(s.from),b=toMin(s.to);return b>a?b-a:b+1440-a}
-function hours(min){return (min/60).toFixed(2).replace(".",",")}
-function hoursShort(min){const h=min/60;return (Number.isInteger(h)?String(h):h.toFixed(1).replace(".",","))}
+// Stunden ohne Komma, genau auf die Minute: „40 Std.“, „21 Std. 30 Min.“
+function hm(min){min=Math.round(min);const h=Math.floor(min/60),m=min%60;return m?(h?h+" Std. ":"")+m+" Min.":h+" Std."}
+// Mitarbeiter ohne E-Mail (stehen schon im Plan, haben sich aber noch nicht angemeldet) haben eine interne Kennung ohne @
+const noMail=id=>!String(id).includes("@");
 // Anfangsbuchstaben nur aus echten Wörtern (Klammern wie "(Test)" zählen nicht mit)
 function initials(n){return String(n).split(/\s+/).map(w=>w.replace(/[^\p{L}]/gu,"")).filter(Boolean).filter(w=>w!=="Test").map(w=>w[0]).join("").slice(0,2).toUpperCase()||"?"}
 const overnight = s => toMin(s.to) <= toMin(s.from);
@@ -83,7 +85,9 @@ applyFont(bigFont);
 $("font-btn").onclick=()=>{bigFont=!bigFont;applyFont(bigFont);try{localStorage.setItem("dp-big",bigFont?"1":"0")}catch{}};
 
 /* ---------- Zustand ---------- */
-let me=null, isChef=false, team=new Map(), weekShifts=[], monthShifts=[], openShifts=[], myShifts=[];
+// isGuest: hat ein Konto, ist aber noch nicht bestätigt → darf nur ansehen. isOwner: Hauptchef, darf andere zu Chefs machen.
+let isGuest=false, isOwner=false, admins=new Set(), myName="";
+let me=null, isChef=false, team=new Map(), weekShifts=[], monthShifts=[], openShifts=[], myShifts=[], requests=[];
 let weekOffset=0, focus=null, search="", view="mine", listeners=[], weekListener=null, showPast=false;
 
 function stopListeners(){listeners.forEach(u=>u());listeners=[];if(weekListener){weekListener();weekListener=null}}
@@ -101,7 +105,37 @@ const store = {
   add:d=>DEMO?demo.set("d"+Math.random().toString(36).slice(2,9),d):addDoc(collection(db,"shifts"),d),
   del:id=>DEMO?demo.del(id):deleteDoc(doc(db,"shifts",id)),
   teamSet:(mail,d)=>DEMO?demo.teamSet(mail,d):setDoc(doc(db,"team",mail),d),
-  teamDel:mail=>DEMO?demo.teamDel(mail):deleteDoc(doc(db,"team",mail))
+  // Entfernen: Eintrag weg; hatte die Person eine E-Mail, wird sie gesperrt (sieht den Plan nicht mehr). War sie Chef, ist sie es danach nicht mehr.
+  async teamDel(mail,wasAdmin){
+    if(DEMO)return demo.teamDel(mail);
+    const b=writeBatch(db); b.delete(doc(db,"team",mail));
+    if(!noMail(mail))b.set(doc(db,"blocked",mail),{at:serverTimestamp()});
+    if(wasAdmin)b.delete(doc(db,"admins",mail));
+    await b.commit();
+  },
+  // Anmeldung ablehnen: Anmeldung weg und E-Mail sperren
+  async reject(mail){
+    if(DEMO)return demo.reject(mail);
+    const b=writeBatch(db); b.delete(doc(db,"requests",mail)); b.set(doc(db,"blocked",mail),{at:serverTimestamp()});
+    await b.commit();
+  },
+  // Chef-Rechte geben oder wegnehmen (nur der Hauptchef)
+  setAdmin:(mail,on)=>DEMO?demo.setAdmin(mail,on):on?setDoc(doc(db,"admins",mail),{at:serverTimestamp()}):deleteDoc(doc(db,"admins",mail)),
+  // E-Mail einer Person zuordnen: Eintrag unter der E-Mail anlegen; stand die Person schon ohne E-Mail im Plan (old),
+  // werden ihre Dienste auf die E-Mail umgeschrieben und der alte Eintrag gelöscht. Die Anmeldung verschwindet.
+  // Alles in einem Rutsch: entweder klappt alles oder gar nichts.
+  async link(mail,d,old){
+    if(DEMO)return demo.link(mail,d,old);
+    const docs=old?(await getDocs(query(collection(db,"shifts"),where("who","==",old)))).docs:[];
+    if(docs.length>480)throw new Error("Zu viele Dienste auf einmal");
+    const b=writeBatch(db);
+    b.set(doc(db,"team",mail),d);
+    docs.forEach(x=>b.update(x.ref,{who:mail}));
+    if(old)b.delete(doc(db,"team",old));
+    b.delete(doc(db,"requests",mail));
+    b.delete(doc(db,"blocked",mail));
+    await b.commit();
+  }
 };
 
 /* ---------- Anmelden ---------- */
@@ -110,7 +144,7 @@ function setMode(m){
   mode=m;
   $("tab-login").classList.toggle("on",m==="login"); $("tab-login").setAttribute("aria-selected",m==="login");
   $("tab-register").classList.toggle("on",m==="register"); $("tab-register").setAttribute("aria-selected",m==="register");
-  $("pass2-wrap").hidden=m!=="register"; $("register-hint").hidden=m!=="register"; $("forgot").hidden=m!=="login";
+  $("pass2-wrap").hidden=m!=="register"; $("name-wrap").hidden=m!=="register"; $("register-hint").hidden=m!=="register"; $("forgot").hidden=m!=="login";
   $("login-pass").autocomplete=m==="register"?"new-password":"current-password";
   $("login-submit").textContent=m==="register"?"Konto erstellen":"Anmelden";
   $("login-err").hidden=true;
@@ -127,9 +161,12 @@ $("login-form").addEventListener("submit",async e=>{
   const btn=$("login-submit"); btn.disabled=true;
   try{
     if(mode==="register"){
+      const name=$("login-name").value.trim().slice(0,60);
+      if(!name)return loginError("Bitte deinen Namen eingeben, damit dein Chef weiß, wer du bist.");
       if(pass.length<8)return loginError("Das Passwort braucht mindestens 8 Zeichen.");
       if(pass!==$("login-pass2").value)return loginError("Die beiden Passwörter sind nicht gleich.");
       const cred=await createUserWithEmailAndPassword(auth,mail,pass);
+      try{await updateProfile(cred.user,{displayName:name})}catch(e){console.error(e)}
       await sendEmailVerification(cred.user);
     }else{
       await signInWithEmailAndPassword(auth,mail,pass);
@@ -169,17 +206,29 @@ async function route(user){
   stopListeners(); closeModal();
   if(!user){setMode("login");show("screen-login");return}
   if(!user.emailVerified){$("verify-mail").textContent=user.email;$("verify-err").hidden=true;show("screen-verify");return}
-  me=user.email.toLowerCase(); isChef=false;
+  me=user.email.toLowerCase(); isChef=false; isGuest=false; isOwner=false; myName=user.displayName||"";
   let netErr=false;
   try{await getDoc(doc(db,"admins",me));isChef=true}
   catch(e){if(e.code!=="permission-denied"){netErr=true;console.error(e)}}
+  // Hauptchef: Lesen von owner/<E-Mail> klappt nur für ihn (seine E-Mail steht nur in den Firestore-Regeln)
+  if(isChef){try{await getDoc(doc(db,"owner",me));isOwner=true}catch(e){}}
   if(run!==routeRun)return;
   if(!isChef&&!netErr){
     let ok=false;
     try{ok=(await getDoc(doc(db,"team",me))).exists()}
     catch(e){if(e.code!=="permission-denied")netErr=true;console.error(e)}
     if(run!==routeRun)return;
-    if(!ok&&!netErr){$("denied-mail").textContent=me;$("denied-text").hidden=false;$("denied-net").hidden=true;show("screen-denied");return}
+    if(!ok&&!netErr){
+      // Noch nicht bestätigt: Der Chef bekommt eine Anmeldung („Wer ist das?“). Bis dahin nur ansehen.
+      // Klappt das Melden wegen fehlender Rechte nicht, ist die E-Mail gesperrt.
+      try{await setDoc(doc(db,"requests",me),{name:String(user.displayName||"").slice(0,60),at:serverTimestamp()});isGuest=true}
+      catch(e){
+        if(run!==routeRun)return;
+        if(e.code==="permission-denied"){$("denied-mail").textContent=me;$("denied-text").hidden=false;$("denied-net").hidden=true;show("screen-denied");return}
+        netErr=true;console.error(e);
+      }
+      if(run!==routeRun)return;
+    }
   }
   if(netErr){$("denied-text").hidden=true;$("denied-net").hidden=false;show("screen-denied");return}
   startApp();
@@ -197,18 +246,29 @@ function onDenied(err){
 
 function startApp(){
   show("screen-app");
-  view=isChef?"plan":"mine";
+  view=isChef||isGuest?"plan":"mine";
   $("team-btn").hidden=!isChef;
   $("side").hidden=!isChef;
-  $("viewtabs").hidden=isChef;
+  $("viewtabs").hidden=isChef||isGuest;
   if(DEMO){demo.refresh();return}
   listeners.push(onSnapshot(collection(db,"team"),snap=>{
-    team=new Map(snap.docs.map(d=>[d.id,d.data()])); render();
+    team=new Map(snap.docs.map(d=>[d.id,d.data()]));
+    // Chef hat gerade bestätigt (oder entfernt): neu prüfen, damit die Knöpfe sofort stimmen
+    if(!isChef&&team.has(me)===isGuest){route(auth.currentUser);return}
+    render();
   },onDenied));
   listeners.push(onSnapshot(query(collection(db,"shifts"),where("status","in",["open","wait"])),snap=>{
     openShifts=snap.docs.map(d=>({id:d.id,...d.data()})); render();
   },onDenied));
-  if(!isChef){
+  if(isChef){
+    listeners.push(onSnapshot(collection(db,"requests"),snap=>{
+      requests=snap.docs.map(d=>({id:d.id,...d.data()})); render();
+    },onDenied));
+    listeners.push(onSnapshot(collection(db,"admins"),snap=>{
+      admins=new Set(snap.docs.map(d=>d.id)); render();
+    },onDenied));
+  }
+  if(!isChef&&!isGuest){
     listeners.push(onSnapshot(query(collection(db,"shifts"),where("who","==",me)),snap=>{
       myShifts=snap.docs.map(d=>({id:d.id,...d.data()})); render();
     },onDenied));
@@ -255,6 +315,10 @@ function render(){
 // Oben: „Du wirst gebraucht!“ (Mitarbeiter) bzw. „Offene Dienste“ (Chef)
 function renderAlerts(){
   const today=todayIso();
+  if(isGuest){
+    $("alerts").innerHTML='<div class="guest" role="status"><h2>Willkommen'+(myName?", "+esc(myName):"")+'!</h2><p>Du kannst den Plan schon ansehen. Dein Chef bestätigt noch, wer du bist. Danach kannst du bei deinen Diensten „Ich kann nicht“ und bei offenen Diensten „Ich übernehme“ tippen.</p></div>';
+    return;
+  }
   if(!isChef){
     const need=openShifts.filter(s=>s.status==="open"&&s.gaveUp!==me&&s.date>=today).sort(byTime);
     $("alerts").innerHTML=need.length?'<div class="need" role="status"><h2>Du wirst gebraucht!</h2>'+
@@ -267,11 +331,14 @@ function renderAlerts(){
   }
   const from=fromNum(dayNum(today)-1);
   const open=openShifts.filter(s=>s.date>=from).sort(byTime);
-  $("alerts").innerHTML=open.length?'<div class="chefopen" role="status"><h2>Offene Dienste ('+open.length+')</h2>'+
+  const reqs=requests.filter(r=>!team.has(r.id)).sort((a,b)=>a.id.localeCompare(b.id));
+  $("alerts").innerHTML=(reqs.length?'<div class="chefreq" role="status"><h2>Neue Anmeldungen ('+reqs.length+')</h2>'+
+    reqs.map(r=>'<div class="arow"><span><b>'+esc(r.name||"Ohne Namen")+'</b><br>'+esc(r.id)+'</span><button class="btn small" data-a="who" data-m="'+esc(r.id)+'">Wer ist das?</button></div>').join("")+'</div>':"")+
+    (open.length?'<div class="chefopen" role="status"><h2>Offene Dienste ('+open.length+')</h2>'+
     open.map(s=>{let b="";
       if(s.status==="wait")b='<button class="btn small" data-a="ok" data-id="'+s.id+'">'+esc(nameOf(s.taker))+' bestätigen</button>';
       const txt=s.status==="open"?(s.gaveUp?esc(nameOf(s.gaveUp))+" kann nicht":"Noch niemand eingeteilt"):esc(nameOf(s.taker))+" will übernehmen";
-      return '<div class="arow"><span><b>'+weekdayLong(s.date)+" "+fmt(s.date)+", "+s.from+" – "+s.to+' Uhr</b><br>'+txt+'</span>'+b+'</div>'}).join("")+'</div>':"";
+      return '<div class="arow"><span><b>'+weekdayLong(s.date)+" "+fmt(s.date)+", "+s.from+" – "+s.to+' Uhr</b><br>'+txt+'</span>'+b+'</div>'}).join("")+'</div>':"");
 }
 
 // „Meine Dienste“ – einfache Liste für Mitarbeiter
@@ -282,7 +349,7 @@ function renderMine(){
   const list=[...mine,...pending].sort(byTime).slice(0,30);
   const n0=mondayNum(0), a=fromNum(n0), b=fromNum(n0+6);
   const weekMin=myShifts.filter(s=>s.status==="ok"&&s.date>=a&&s.date<=b).reduce((x,s)=>x+dur(s),0);
-  let h='<div class="minehead"><h2>Deine nächsten Dienste</h2><span class="note">Diese Woche: '+hoursShort(weekMin)+' Stunden</span></div>';
+  let h='<div class="minehead"><h2>Deine nächsten Dienste</h2><span class="note">Diese Woche: '+hm(weekMin)+'</span></div>';
   if(!list.length){
     h+='<div class="empty">Du hast gerade keine Dienste eingetragen. Unter „Ganzer Plan“ siehst du alle Dienste.</div>';
   }else{
@@ -316,8 +383,8 @@ function renderPlan(){
       const sum=list=>list.filter(s=>s.who===t.mail&&s.status==="ok").reduce((a,s)=>a+dur(s),0);
       const min=sum(weekShifts), mon=sum(monthShifts), soll=Number(t.soll)||0;
       return '<button class="person'+(focus===t.mail?" on":"")+'" data-a="focus" data-n="'+esc(t.mail)+'"><span class="av" style="background:var(--p'+colorOf(t.mail)+')">'+esc(initials(t.name))+'</span><span><b>'+esc(t.name)+'</b>'+
-        '<span class="hrs'+(soll&&min/60>soll?" over":"")+'">Woche: '+hoursShort(min)+(soll?' / '+hoursShort(soll*60):'')+' Std.</span>'+
-        '<span class="hrs">'+monthName+': '+hoursShort(mon)+' Std.</span></span></button>';
+        '<span class="hrs'+(soll&&min/60>soll?" over":"")+'">Woche: '+hm(min)+(soll?' von '+hm(soll*60):'')+'</span>'+
+        '<span class="hrs">'+monthName+': '+hm(mon)+'</span></span></button>';
     }).join(""):'<p class="note">'+(members.length?"Niemand gefunden.":"Noch keine Mitarbeiter. Oben auf „Mitarbeiter“ tippen und E-Mails eintragen.")+'</p>';
   }
 
@@ -394,7 +461,8 @@ function openShift(id,date){
       '<button class="btn ghost" data-a="close">Abbrechen</button><button class="btn" type="submit" form="shift-form">Speichern</button></div>');
   }else{
     let body="", btns='';
-    if(s.status==="ok"&&s.who===me){
+    if(isGuest){body=(s.status==="open"?"Dieser Dienst ist offen.":s.status==="wait"?esc(nameOf(s.taker))+" will übernehmen.":"Eingeteilt: "+esc(nameOf(s.who))+".")+" Ändern kannst du erst, wenn dein Chef bestätigt hat, wer du bist."}
+    else if(s.status==="ok"&&s.who===me){
       body="Das ist dein Dienst. Wenn du nicht kannst, sehen alle anderen, dass jemand gesucht wird.";
       btns='<button class="btn warn-ghost wide" data-a="askcant" data-id="'+s.id+'">Ich kann nicht</button>';
     }
@@ -411,13 +479,17 @@ function openShift(id,date){
 function openTeam(){
   const members=[...team.entries()].sort((a,b)=>a[1].name.localeCompare(b[1].name,"de"));
   const link=DEMO?"https://mitarbeiterdienstplan-assistenz.github.io/":location.origin+location.pathname;
-  openModal('<h3>Mitarbeiter</h3><p>Nur diese E-Mails können sich registrieren und den Dienstplan sehen.</p>'+
+  openModal('<h3>Mitarbeiter</h3><p>Jeder mit Konto kann den Plan ansehen. Absagen und Übernehmen kann nur, wen du bestätigt hast. Neue Anmeldungen erscheinen oben unter „Neue Anmeldungen“.'+(isOwner?' Chefs dürfen alles ändern wie du.':'')+'</p>'+
     '<div class="teamlist">'+(members.length?members.map(([mail,t])=>
-      '<div class="trow"><span class="av" style="background:var(--p'+mod(t.color||0,COLORS)+')">'+esc(initials(t.name))+'</span><span class="tx"><b>'+esc(t.name)+'</b><span>'+esc(mail)+' · Soll '+hours((Number(t.soll)||0)*60)+' Std.</span></span>'+
+      '<div class="trow"><span class="av" style="background:var(--p'+mod(t.color||0,COLORS)+')">'+esc(initials(t.name))+'</span><span class="tx"><b>'+esc(t.name)+(admins.has(mail)?'<em class="chefbadge">Chef</em>':'')+'</b>'+
+      (noMail(mail)?'<span class="nomail">Noch nicht angemeldet</span>':'<span>'+esc(mail)+'</span>')+
+      '<span>Soll pro Woche: '+hm((Number(t.soll)||0)*60)+'</span></span>'+
+      (noMail(mail)?'<button class="btn ghost small" data-a="addmail" data-n="'+esc(mail)+'">E-Mail eintragen</button>'
+        :isOwner?'<button class="btn ghost small" data-a="askadmin" data-n="'+esc(mail)+'">'+(admins.has(mail)?"Chef-Rechte wegnehmen":"Zum Chef machen")+'</button>':'')+
       '<button class="btn del small" data-a="askrm" data-n="'+esc(mail)+'">Entfernen</button></div>').join(""):'<p class="note">Noch niemand eingetragen.</p>')+'</div>'+
     '<form id="team-form" class="fields">'+
       '<label class="field wide">Name<input id="t-name" autocomplete="off" placeholder="z. B. Anna Meier" required></label>'+
-      '<label class="field">E-Mail<input id="t-mail" type="email" autocomplete="off" inputmode="email" required></label>'+
+      '<label class="field">E-Mail (geht auch später)<input id="t-mail" type="email" autocomplete="off" inputmode="email"></label>'+
       '<label class="field">Soll-Stunden pro Woche<input id="t-soll" type="number" min="0" max="80" step="0.5" value="0"></label>'+
       '<p class="err wide" id="t-err" hidden></p>'+
       '<div class="btns wide"><button class="btn" type="submit">Hinzufügen</button></div></form>'+
@@ -440,8 +512,24 @@ async function act(a,el){
     if(a==="no"){await store.update(id,{status:"open",taker:null});closeModal();toast("Abgelehnt","Der Dienst ist wieder offen.")}
     if(a==="askdel"){el.textContent="Wirklich löschen?";el.dataset.a="del"}
     else if(a==="del"){await store.del(id);closeModal();toast("Erfolgreich","Dienst wurde gelöscht.")}
+    if(a==="pick"){const t=team.get(el.dataset.n);if(!t)return;
+      $("confirm-box").innerHTML='<div class="confirm">Ist <b>'+esc(el.dataset.m)+'</b> wirklich <b>'+esc(t.name)+'</b>? Dann sieht '+esc(t.name)+' ab sofort den Plan und die eigenen Dienste.</div>'+
+        '<button class="btn wide" data-a="link" data-n="'+esc(el.dataset.n)+'" data-m="'+esc(el.dataset.m)+'">Ja, das ist '+esc(t.name)+'</button>';
+      $("confirm-box").scrollIntoView({block:"nearest"});return}
+    if(a==="link"){const t=team.get(el.dataset.n);if(!t)return;
+      await store.link(el.dataset.m,{name:t.name,soll:Number(t.soll)||0,color:t.color||0},el.dataset.n);
+      if(focus===el.dataset.n)focus=el.dataset.m;closeModal();toast("Bestätigt",t.name+" kann jetzt den Plan sehen.")}
+    if(a==="asknew"){el.textContent="Wirklich als neue Person anlegen?";el.dataset.a="new-person";return}
+    if(a==="new-person"){const r=requests.find(x=>x.id===el.dataset.m);const name=(r&&r.name)||el.dataset.m.split("@")[0];
+      await store.link(el.dataset.m,{name,soll:0,color:freeColor()},null);closeModal();toast("Bestätigt",name+" ist neu im Plan und kann ihn sehen.")}
+    if(a==="askreject"){el.textContent="Wirklich ablehnen? Dann sieht die Person den Plan nicht mehr.";el.dataset.a="reject";return}
+    if(a==="reject"){await store.reject(el.dataset.m);closeModal();toast("Abgelehnt","Diese E-Mail kann den Plan nicht mehr sehen.")}
+    if(a==="askadmin"){const on=!admins.has(el.dataset.n);el.textContent=on?"Wirklich zum Chef machen? Darf dann alles ändern.":"Wirklich Chef-Rechte wegnehmen?";el.dataset.a="admin";return}
+    if(a==="admin"){const n=el.dataset.n,on=!admins.has(n);await store.setAdmin(n,on);toast(on?"Chef-Rechte gegeben":"Chef-Rechte weggenommen",nameOf(n)+(on?" ist jetzt auch Chef.":" ist kein Chef mehr."));setTimeout(openTeam,50)}
     if(a==="askrm"){el.textContent="Wirklich entfernen? (Dienste bleiben im Plan)";el.dataset.a="rm"}
-    else if(a==="rm"){await store.teamDel(el.dataset.n);toast("Entfernt","Diese E-Mail hat keinen Zugriff mehr.");setTimeout(openTeam,50)}
+    else if(a==="rm"){const n=el.dataset.n,adm=admins.has(n);
+      if(adm&&!isOwner){toast("Geht nicht","Einen Chef kann nur der Hauptchef entfernen.",true);return}
+      await store.teamDel(n,adm);toast("Entfernt",noMail(n)?"Die Person steht nicht mehr im Plan.":"Diese E-Mail kann den Plan nicht mehr sehen.");setTimeout(openTeam,50)}
     if(a==="copy"){
       const t=$("share-link").textContent;
       try{await navigator.clipboard.writeText(t);toast("Kopiert","Link ist in der Zwischenablage.")}
@@ -466,6 +554,9 @@ document.body.addEventListener("click",e=>{
   if(a==="close")return closeModal();
   if(a==="focus"){focus=focus===b.dataset.n?null:b.dataset.n;return render()}
   if(a==="showpast"){showPast=true;return render()}
+  if(a==="who")return openWho(b.dataset.m);
+  if(a==="addmail")return openMail(b.dataset.n);
+  if(a==="team")return openTeam();
   // Doppeltippen verhindern: Knopf ist gesperrt, bis die Aktion fertig ist
   if(b.disabled)return;
   b.disabled=true;
@@ -475,7 +566,7 @@ document.body.addEventListener("click",e=>{
 // Doppeltes Speichern verhindern (z. B. zweimal schnell auf „Speichern“ getippt)
 let saving=false;
 document.body.addEventListener("submit",async e=>{
-  if(e.target.id!=="shift-form"&&e.target.id!=="team-form")return;
+  if(e.target.id!=="shift-form"&&e.target.id!=="team-form"&&e.target.id!=="mail-form")return;
   e.preventDefault();
   if(saving)return;
   saving=true;
@@ -496,14 +587,53 @@ async function submitForm(f){
   if(f.id==="team-form"){
     const name=$("t-name").value.trim(), mail=$("t-mail").value.trim().toLowerCase(), soll=parseFloat($("t-soll").value)||0, err=$("t-err");
     if(!name){err.textContent="Bitte einen Namen eingeben.";err.hidden=false;return}
-    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)){err.textContent="Bitte eine gültige E-Mail eingeben.";err.hidden=false;return}
-    if(team.has(mail)){err.textContent="Diese E-Mail ist schon eingetragen.";err.hidden=false;return}
-    if(mail===me){err.textContent="Das ist deine eigene E-Mail, die hat als Chef schon Zugriff.";err.hidden=false;return}
-    const used=new Set([...team.values()].map(t=>t.color));
-    let color=0; while(used.has(color)&&color<COLORS-1)color++;
-    try{await store.teamSet(mail,{name,soll,color});toast("Hinzugefügt",name+" kann sich jetzt registrieren.");setTimeout(openTeam,50)}
+    const bad=mail?mailProblem(mail):""; if(bad){err.textContent=bad;err.hidden=false;return}
+    const d={name,soll,color:freeColor()};
+    try{
+      if(mail)await store.link(mail,d,null);
+      else await store.teamSet("ohne-email-"+Date.now().toString(36)+Math.random().toString(36).slice(2,6),d);
+      toast("Hinzugefügt",mail?name+" kann sich jetzt registrieren.":name+" steht jetzt im Plan. Wenn sich "+name+" registriert, bestätigst du es oben.");setTimeout(openTeam,50)}
     catch(x){fail(x)}
   }
+  if(f.id==="mail-form"){
+    const old=f.dataset.n, t=team.get(old), mail=$("m-mail").value.trim().toLowerCase(), err=$("m-err");
+    if(!t)return closeModal();
+    const bad=mailProblem(mail); if(bad){err.textContent=bad;err.hidden=false;return}
+    try{await store.link(mail,{name:t.name,soll:Number(t.soll)||0,color:t.color||0},old);if(focus===old)focus=mail;
+      toast("Gespeichert",t.name+" kann sich jetzt mit dieser E-Mail registrieren.");setTimeout(openTeam,50)}
+    catch(x){fail(x)}
+  }
+}
+function freeColor(){const used=new Set([...team.values()].map(t=>t.color));let c=0;while(used.has(c)&&c<COLORS-1)c++;return c}
+function mailProblem(mail){
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail))return "Bitte eine gültige E-Mail eingeben.";
+  if(team.has(mail))return "Diese E-Mail ist schon eingetragen.";
+  if(mail===me)return "Das ist deine eigene E-Mail, die hat als Chef schon Zugriff.";
+  return "";
+}
+// Fenster „Wer ist das?“: neue Anmeldung einer Person aus dem Plan zuordnen
+function openWho(mail){
+  const r=requests.find(x=>x.id===mail); if(!r)return;
+  const rn=(r.name||"").toLowerCase();
+  // Personen ohne E-Mail; passende Namen (z. B. „Luke“ ↔ „Luk“) stehen oben
+  const score=n=>{n=n.toLowerCase();return rn&&(rn.includes(n)||n.includes(rn.split(" ")[0]))?0:1};
+  const cand=[...team.entries()].filter(([id])=>noMail(id)).sort((a,b)=>score(a[1].name)-score(b[1].name)||a[1].name.localeCompare(b[1].name,"de"));
+  openModal('<h3>Wer ist das?</h3><p><b>'+esc(r.name||"Ohne Namen")+'</b> hat sich angemeldet mit <b>'+esc(mail)+'</b>.</p>'+
+    (cand.length?'<p>Tippe auf den passenden Namen aus deinem Plan:</p><div class="pick">'+
+      cand.map(([id,t])=>'<button class="btn ghost" data-a="pick" data-n="'+esc(id)+'" data-m="'+esc(mail)+'"><span class="av" style="background:var(--p'+mod(t.color||0,COLORS)+')">'+esc(initials(t.name))+'</span>'+esc(t.name)+'</button>').join("")+'</div>'
+      :'<p>Im Plan steht niemand mehr ohne E-Mail.</p>')+
+    '<div id="confirm-box"></div>'+
+    '<div class="btns stack"><button class="btn ghost wide" data-a="asknew" data-m="'+esc(mail)+'">Steht nicht im Plan – neu anlegen</button>'+
+    '<button class="btn del wide" data-a="askreject" data-m="'+esc(mail)+'">Ablehnen – kenne ich nicht</button>'+
+    '<button class="btn ghost wide" data-a="close">Später</button></div>');
+}
+// Kleines Fenster: E-Mail für eine Person aus dem Plan selbst eintragen
+function openMail(id){
+  const t=team.get(id); if(!t)return;
+  openModal('<h3>E-Mail für '+esc(t.name)+'</h3><p>Mit dieser E-Mail kann sich '+esc(t.name)+' dann registrieren und den Plan sehen. Die Dienste bleiben alle erhalten.</p>'+
+    '<form id="mail-form" class="fields" data-n="'+esc(id)+'"><label class="field wide">E-Mail<input id="m-mail" type="email" autocomplete="off" inputmode="email" required></label>'+
+    '<p class="err wide" id="m-err" hidden></p></form>'+
+    '<div class="btns"><button class="btn ghost" data-a="team">Zurück</button><button class="btn" type="submit" form="mail-form">Speichern</button></div>');
 }
 
 /* ---------- Vorschau-Modus (nur localhost) ---------- */
@@ -515,6 +645,7 @@ const demo = {
   refresh(){
     splitLoaded(this.shifts);
     openShifts=this.shifts.filter(s=>s.status==="open"||s.status==="wait");
+    requests=this.requests;
     myShifts=this.shifts.filter(s=>s.who===me);
     render();
   },
@@ -522,7 +653,11 @@ const demo = {
   async set(id,d){const i=this.shifts.findIndex(x=>x.id===id);const s={id,...d};if(i<0)this.shifts.push(s);else this.shifts[i]=s;this.refresh()},
   async del(id){this.shifts=this.shifts.filter(x=>x.id!==id);this.refresh()},
   async teamSet(mail,d){team.set(mail,d);this.refresh()},
-  async teamDel(mail){team.delete(mail);this.refresh()},
+  async teamDel(mail){team.delete(mail);admins.delete(mail);this.refresh()},
+  async setAdmin(mail,on){if(on)admins.add(mail);else admins.delete(mail);this.refresh()},
+  requests:[],
+  async reject(mail){this.requests=this.requests.filter(r=>r.id!==mail);this.refresh()},
+  async link(mail,d,old){if(old){team.delete(old);this.shifts.forEach(s=>{if(s.who===old)s.who=mail})}team.set(mail,d);this.requests=this.requests.filter(r=>r.id!==mail);this.refresh()},
   async init(){
     $("demo-badge").hidden=false;
     let plan={team:{},shifts:[]};
@@ -530,9 +665,13 @@ const demo = {
     team=new Map(Object.entries(plan.team));
     // Dienste: [Datum, von, bis, wer] – wer leer = offen, noch niemand eingeteilt
     this.shifts=plan.shifts.map(([date,from,to,who],k)=>({id:"s"+k,date,from,to,who:who||null,status:who?"ok":"open",gaveUp:null,taker:null}));
+    this.requests=(plan.anmeldungen||[]).map(([id,name])=>({id,name}));
     isChef=DEMO==="chef";
-    const pick=DEMO.toLowerCase()+"@beispiel.de";
-    me=isChef?"chef@beispiel.de":team.has(pick)?pick:[...team.keys()][0]||"";
+    const pick=[...team.entries()].find(([,t])=>t.name.toLowerCase()===DEMO.toLowerCase());
+    me=isChef?"chef@beispiel.de":pick?pick[0]:[...team.keys()][0]||"";
+    isOwner=isChef;
+    // ?demo=gast: hat sich registriert, ist aber noch nicht bestätigt
+    isGuest=DEMO==="gast"; if(isGuest){me="luke.m@beispiel.de";myName="Luke"}
     // Diese Woche noch leer? Dann gleich die erste Woche mit Diensten zeigen
     const first=this.shifts.map(s=>s.date).sort()[0];
     if(first&&dayNum(first)>mondayNum(0)+6)weekOffset=Math.floor((dayNum(first)-mondayNum(0))/7);
